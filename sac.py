@@ -38,39 +38,18 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
         start_steps=10_000, update_after=1000, update_every=50,
         num_test_episodes=10, max_ep_len=1000, logger_kwargs=None,
         save_freq=int(1e4), save_path=None):
-    """Soft Actor-Critic (SAC)
+    
+    """Soft Actor-Critic (SAC), documentation from 
+    https://spinningup.openai.com/en/latest/algorithms/sac.html
 
-    Args:
+
+    Params:
         env_fn : A function which creates a copy of the environment.
             The environment must satisfy the OpenAI Gym API.
 
-        actor_critic: A function which takes in `action_space` and
-            `observation_space` kwargs, and returns actor and critic
-            tf.keras.Model-s.
-
-            Actor should take an observation in and output:
-            ===========  ================  =====================================
-            Symbol       Shape             Description
-            ===========  ================  =====================================
-            ``mu``       (batch, act_dim)  | Computes mean actions from policy
-                                           | given states.
-            ``pi``       (batch, act_dim)  | Samples actions from policy given
-                                           | states.
-            ``logp_pi``  (batch,)          | Gives log probability, according to
-                                           | the policy, of the action sampled
-                                           | by ``pi``. Critical: must be
-                                           | differentiable with respect to
-                                           | policy parameters all the way
-                                           | through action sampling.
-            ===========  ================  =====================================
-
-            Critic should take an observation and an action in and output:
-            ===========  ================  =====================================
-            Symbol       Shape             Description
-            ===========  ================  =====================================
-            ``q``        (batch,)          | Gives one estimate of Q* for
-                                           | states and actions in the input.
-            ===========  ================  =====================================
+        actor_critic: A function which takes in placeholder 
+            symbols for state, x_ph, and action, a_ph, and returns 
+            the main outputs from the agents Tensorflow computation graph:
 
         ac_kwargs (dict): Any kwargs appropriate for the actor_critic
             function you provided to SAC.
@@ -88,14 +67,7 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
         gamma (float): Discount factor. (Always between 0 and 1.)
 
         polyak (float): Interpolation factor in polyak averaging for target
-            networks. Target networks are updated towards main networks
-            according to:
-
-            .. math:: \\theta_{\\text{targ}} \\leftarrow
-                \\rho \\theta_{\\text{targ}} + (1-\\rho) \\theta
-
-            where :math:`\\rho` is polyak. (Always between 0 and 1, usually
-            close to 1.)
+            networks. 
 
         lr (float): Learning rate (used for both policy and value learning).
 
@@ -126,11 +98,10 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
         save_freq (int): How often (in terms of environment iterations) to save
             the current policy.
 
-        save_path (str): The path specifying where to save the trained actor
-            model (note: path needs to point to a directory). Setting the value
-            to None turns off the saving.
+        save_path (str): The path specifying where to save the trained model.
     """
     config = locals()
+    # logger code copied from https://github.com/openai/spinningup/blob/master/spinup/utils/logx.py
     logger = logx.EpochLogger(**(logger_kwargs or {}))
     logger.save_config(config)
 
@@ -141,66 +112,79 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
     env, test_env = env_fn(), env_fn()
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
-    # This implementation assumes all dimensions share the same bound!
-    # assert np.all(env.action_space.high == env.action_space.high[0])
+    # Set dimensions of observation and action spaces
 
-    # Share information about observation and action spaces with policy.
+    # Give policy info on action and observation spaces
     ac_kwargs = ac_kwargs or {}
     ac_kwargs['action_space'] = env.action_space
     ac_kwargs['observation_space'] = env.observation_space
 
-    # Experience buffer.
+    # The experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim,
                                  size=replay_size)
 
-    # Build an actor and critics.
+    # Get actor critic
     actor, critic = actor_critic(**ac_kwargs)
 
+    # Two critics to avoid overestimation error
     critic1 = critic
     critic2 = tf.keras.models.clone_model(critic)
 
     input_shape = [(None, obs_dim), (None, act_dim)]
 
-    critic1.build(input_shape)  # Initialize weights.
+
+    # Set weights for each critic
+    critic1.build(input_shape)
     target_critic1 = tf.keras.models.clone_model(critic)
     target_critic1.set_weights(critic1.get_weights())
 
-    critic2.build(input_shape)  # Initialize weights.
+    critic2.build(input_shape)
     target_critic2 = tf.keras.models.clone_model(critic)
     target_critic2.set_weights(critic2.get_weights())
 
+    # Create variables used by optimizer
     critic_variables = critic1.trainable_variables + critic2.trainable_variables
 
+    # Set up optimizer to later calculate gradients
     optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=lr)
 
+    # For use by tensorflow
     @tf.function
     def get_action(o, deterministic=tf.constant(False)):
         mu, pi, _ = actor(tf.expand_dims(o, 0))
         if deterministic:
             return mu[0]
         else:
+            #sample policy if non-deterministic
             return pi[0]
 
+    # Learning step for soft-actor critic
+    # 12 - 15 from pseudo code
     @tf.function
     def learn_on_batch(obs1, obs2, acts, rews, done):
         with tf.GradientTape(persistent=True) as g:
             # Main outputs from computation graph.
+            # Compute policy paramerters pi
+            # Compute entropy, logp_pi
             _, pi, logp_pi = actor(obs1)
             q1 = critic1([obs1, acts])
             q2 = critic2([obs1, acts])
 
-            # Compose q with pi, for pi-learning.
+            # Compute Q-values for the current observations 
+            # and actions sampled from the policy.
             q1_pi = critic1([obs1, pi])
             q2_pi = critic2([obs1, pi])
 
             # Get actions and log probs of actions for next states.
             _, pi_next, logp_pi_next = actor(obs2)
 
-            # Target Q-values, using actions from *current* policy.
+            # Get target for the Q functions
+            # Calculated using current policy, for each critic
             target_q1 = target_critic1([obs2, pi_next])
             target_q2 = target_critic2([obs2, pi_next])
 
-            # Min Double-Q:
+            ## SAC losses calculations
+            # Get the minimum Q-value btween the two critics for the current policy
             min_q_pi = tf.minimum(q1_pi, q2_pi)
             min_target_q = tf.minimum(target_q1, target_q2)
 
@@ -216,15 +200,23 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
             value_loss = q1_loss + q2_loss
 
         # Compute gradients and do updates.
+        # Get actor gradients
         actor_gradients = g.gradient(pi_loss, actor.trainable_variables)
+        # Perform updates to actor network
         optimizer.apply_gradients(
             zip(actor_gradients, actor.trainable_variables))
+        # Get critic gradients
         critic_gradients = g.gradient(value_loss, critic_variables)
+        # Update the critic network
         optimizer.apply_gradients(
             zip(critic_gradients, critic_variables))
+        # delete to free space
         del g
 
-        # Polyak averaging for target variables.
+        # Polyak averaging for target variables
+        # Used to slowly update target networks, stabilizes training
+        # Step 15 of pseudocode
+        # phi_target,i = \rho*\phi_targ,i + (1-\rho)\phi_i
         for v, target_v in zip(critic1.trainable_variables,
                                target_critic1.trainable_variables):
             target_v.assign(polyak * target_v + (1 - polyak) * v)
@@ -232,6 +224,7 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
                                target_critic2.trainable_variables):
             target_v.assign(polyak * target_v + (1 - polyak) * v)
 
+        # Return Dictionary
         return dict(pi_loss=pi_loss,
                     q1_loss=q1_loss,
                     q2_loss=q2_loss,
@@ -243,13 +236,16 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
         for _ in range(num_test_episodes):
             o, d, ep_ret, ep_len = test_env.reset(), False, 0, 0
             o = o[0]
+            # test until not done, or max episode length reached
             while not (d or (ep_len == max_ep_len)):
-                # Take deterministic actions at test time.
+                # Take deterministic actions at test time
+                # Perform step in the test environment
                 o, r, d, d2, _ = test_env.step(
                     get_action(tf.convert_to_tensor(o), tf.constant(True)))
                 ep_ret += r
                 ep_len += 1
                 d = d or d2
+            # Add to the logger
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
 
     start_time = time.time()
@@ -263,41 +259,46 @@ def sac(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=None, seed=0,
         # Until start_steps have elapsed, randomly sample actions
         # from a uniform distribution for better exploration. Afterwards,
         # use the learned policy.
+
+        # At the beginning t<start_steps, randomly sample actions
+        # This provides better exploration
+        # if t>start_steps, use the learned policy
         if t > start_steps:
             a = get_action(tf.convert_to_tensor(o))
         else:
             a = env.action_space.sample()
 
-        # Step the environment.
+        # Take action and step the environment
         o2, r, d, d2, _ = env.step(a)
         ep_ret += r
         ep_len += 1
 
-        # Ignore the "done" signal if it comes from hitting the time
-        # horizon (that is, when it's an artificial terminal signal
-        # that isn't based on the agent's state).
+        # Ignore the "done" signal if it comes from hitting max time
         d = False if ep_len == max_ep_len else d
         d = d or d2
 
-        # Store experience to replay buffer.
+        # Add experience to the replay buffer
         replay_buffer.store(o, a, r, o2, d)
 
-        # Super critical, easy to overlook step: make sure to update
-        # most recent observation!
+        # Update most recent observation
         o = o2
 
-        # End of trajectory handling.
+        # If end of trajectory
+        # Reset Environment state
+        # Step 8 of pseudocode
         if d or (ep_len == max_ep_len):
             logger.store(EpRet=ep_ret, EpLen=ep_len)
             o, ep_ret, ep_len = env.reset(), 0, 0
             o = o[0]
 
-        # Update handling.
+        # Update 
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
+                # Randomly sample a batch of transitions
                 batch = replay_buffer.sample_batch(batch_size)
+                # Update parameters
+                # Lines 12 - 15 of pseudocode
                 results = learn_on_batch(**batch)
-                # learn_on_batch(**batch)
                 logger.store(LossPi=results['pi_loss'],
                              LossQ1=results['q1_loss'],
                              LossQ2=results['q2_loss'],
