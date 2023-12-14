@@ -1,5 +1,5 @@
 """Core functions of SAC algorithm."""
-""" Code used from https://github.com/awarelab/spinningup_tf2/blob/main/spinup_bis/algos/tf2/sac/core.py"""
+""" Code used from https://github.com/openai/spinningup/blob/master/spinup/algos/tf1/sac/core.py"""
 
 import numpy as np
 import tensorflow as tf
@@ -21,17 +21,13 @@ def gaussian_likelihood(value, mu, log_std):
 
 
 def apply_squashing_func(mu, pi, logp_pi):
-    """Applies adjustment to mean, pi and log prob.
-
-    This formula is a little bit magic. To get an understanding of where it
-    comes from, check out the original SAC paper (arXiv 1801.01290) and look
-    in appendix C. This is a more numerically-stable equivalent to Eq 21.
-    Try deriving it yourself as a (very difficult) exercise. :)
+    """
+    Applies adjustment to mean, pi and log prob.
     """
     logp_pi -= tf.reduce_sum(
         2 * (np.log(2) - pi - tf.nn.softplus(-2 * pi)), axis=1)
 
-    # Squash those unbounded actions!
+    # Bound the actions using tanh
     mu = tf.tanh(mu)
     pi = tf.tanh(pi)
     return mu, pi, logp_pi
